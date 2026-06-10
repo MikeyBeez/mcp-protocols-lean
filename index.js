@@ -12,6 +12,10 @@
  *
  * Read-only over the .md library: it never modifies your protocol files. Tool names match
  * the originals (mikey_prompt_process, mikey_protocol_*) so existing workflow keeps working.
+ *
+ * 2026-06-10: prompt_process and protocol_triggers now also return `suggested_tools`,
+ * matched from protocols/tool-map.json (situation -> tools map, read live like the .md
+ * files, so the map can be edited without restarting the server).
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -71,6 +75,25 @@ function match(text, limit = 4) {
     .map(({ p, s }) => ({ id: p.id, title: p.title, tier: p.tier, why: `matched ${s} signal(s)`, purpose: p.purpose }));
 }
 
+// ---- situation -> tools map (protocols/tool-map.json, read live) -----------
+
+function loadToolMap() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(DIR, 'tool-map.json'), 'utf8'));
+  } catch { return []; }
+}
+
+function matchTools(text, limit = 4) {
+  const q = new Set(tokens(text));
+  if (!q.size) return [];
+  return loadToolMap().map(e => {
+    let s = 0;
+    for (const k of (e.keywords || [])) if (q.has(k.toLowerCase())) s += 1;
+    return { e, s };
+  }).filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, limit)
+    .map(({ e, s }) => ({ situation: e.situation, tools: e.tools, note: e.note, why: `matched ${s} keyword(s)` }));
+}
+
 // ---- tools -----------------------------------------------------------------
 
 function promptProcess({ prompt }) {
@@ -82,11 +105,14 @@ function promptProcess({ prompt }) {
     .filter(p => /^0\b/.test((p.tier || '').trim()) && !have.has(p.id))
     .map(p => ({ id: p.id, title: p.title, tier: p.tier, why: 'tier-0 always-active', purpose: p.purpose }));
   const relevant = [...always, ...hits];
+  const suggested_tools = matchTools(prompt, 4);
   return {
     prompt_seen: (prompt || '').slice(0, 120),
     relevant_protocols: relevant,
+    suggested_tools,
     directive: relevant.length
       ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}. Read any with mikey_protocol_read.`
+        + (suggested_tools.length ? ` USE the suggested tools — they exist for this exact situation.` : '')
       : 'No specific protocol triggered; proceed normally.',
   };
 }
@@ -114,18 +140,18 @@ function search({ query }) {
 
 function triggers({ situation }) {
   if (!situation) throw new Error('protocol_triggers requires `situation`');
-  return { situation, suggested: match(situation, 5) };
+  return { situation, suggested: match(situation, 5), suggested_tools: matchTools(situation, 4) };
 }
 
 const TOOLS = {
-  mikey_prompt_process:   { fn: promptProcess, desc: 'Pre-process a user prompt: returns the protocols whose triggers match, plus a directive. Run before responding.', schema: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] } },
+  mikey_prompt_process:   { fn: promptProcess, desc: 'Pre-process a user prompt: returns the protocols whose triggers match, suggested tools for the situation, plus a directive. Run before responding.', schema: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] } },
   mikey_protocol_list:    { fn: list,          desc: 'List all available protocols with tier and purpose.', schema: { type: 'object', properties: {} } },
   mikey_protocol_read:    { fn: read,          desc: 'Read the full text of a protocol by id.', schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
   mikey_protocol_search:  { fn: search,        desc: 'Full-text search across protocol bodies.', schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
-  mikey_protocol_triggers:{ fn: triggers,      desc: 'Given a situation, return the most relevant protocols.', schema: { type: 'object', properties: { situation: { type: 'string' } }, required: ['situation'] } },
+  mikey_protocol_triggers:{ fn: triggers,      desc: 'Given a situation, return the most relevant protocols and the tools to use for it.', schema: { type: 'object', properties: { situation: { type: 'string' } }, required: ['situation'] } },
 };
 
-const server = new Server({ name: 'mcp-protocols-lean', version: '1.0.0' }, { capabilities: { tools: {} } });
+const server = new Server({ name: 'mcp-protocols-lean', version: '1.1.0' }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.desc, inputSchema: t.schema })),
 }));
@@ -137,4 +163,4 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`[protocols-lean] connected. dir=${DIR} protocols=${loadAll().length}`);
+console.error(`[protocols-lean] connected. dir=${DIR} protocols=${loadAll().length} toolmap=${loadToolMap().length}`);
