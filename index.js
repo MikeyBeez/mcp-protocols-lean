@@ -1,0 +1,140 @@
+#!/usr/bin/env node
+/**
+ * mcp-protocols-lean
+ *
+ * One protocol server over the existing markdown library. Replaces the cluster:
+ *   - protocols        (library + prompt_process hook)  <- the only load-bearing one
+ *   - protocol-engine  (step-runner; only ever held test data, dead since Aug 2025)
+ *   - protocol-tracker (compliance logging; no persistent store)
+ *
+ * mcp-architecture is intentionally NOT folded in — it manages architecture documents,
+ * a separate concern from protocols.
+ *
+ * Read-only over the .md library: it never modifies your protocol files. Tool names match
+ * the originals (mikey_prompt_process, mikey_protocol_*) so existing workflow keeps working.
+ */
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import fs from 'fs';
+import path from 'path';
+import { CONFIG } from './config.js';
+
+const DIR = CONFIG.PROTOCOLS_DIR;
+if (!fs.existsSync(DIR)) { console.error(`[protocols-lean] FATAL: no protocols dir at ${DIR}`); process.exit(1); }
+
+const ok  = (o) => ({ content: [{ type: 'text', text: typeof o === 'string' ? o : JSON.stringify(o, null, 2) }] });
+const err = (m) => ({ content: [{ type: 'text', text: `Error: ${m}` }], isError: true });
+
+const STOP = new Set(('the a an to of for and or is are be when need any new this that with your you my our it its as on in at by').split(' '));
+const tokens = (s) => (s || '').toLowerCase().match(/[a-z0-9]+/g)?.filter(w => w.length > 2 && !STOP.has(w)) || [];
+
+// ---- load + parse the library ---------------------------------------------
+
+function section(body, heading) {
+  const re = new RegExp(`##+\\s*${heading}[^\\n]*\\n([\\s\\S]*?)(?=\\n##\\s|$)`, 'i');
+  const m = body.match(re); return m ? m[1].trim() : '';
+}
+
+function parseProtocol(file) {
+  const id = path.basename(file, '.md');
+  const body = fs.readFileSync(path.join(DIR, file), 'utf8');
+  const title = (body.match(/^#\s+(.+)$/m) || [, id])[1].trim();
+  const purpose = section(body, 'Purpose').replace(/\s+/g, ' ').slice(0, 300);
+  const triggers = section(body, 'Trigger Conditions') || section(body, 'Triggers');
+  const tier = (body.match(/Tier\*?\*?:\s*([^\n]+)/i) || [, ''])[1].trim();
+  const priority = (body.match(/Priority\*?\*?:\s*([^\n]+)/i) || [, ''])[1].trim();
+  return { id, title, purpose, tier, priority, triggers, body };
+}
+
+function loadAll() {
+  return fs.readdirSync(DIR).filter(f => f.endsWith('.md')).map(parseProtocol);
+}
+
+// score a protocol against a free-text situation/prompt
+function score(p, qToks) {
+  if (!qToks.length) return 0;
+  const hay = (p.title + ' ' + p.purpose + ' ' + p.triggers).toLowerCase();
+  let s = 0;
+  for (const t of qToks) if (hay.includes(t)) s += hay.includes(t) ? 1 : 0;
+  // weight title/trigger hits a bit higher
+  const tt = (p.title + ' ' + p.triggers).toLowerCase();
+  for (const t of qToks) if (tt.includes(t)) s += 0.5;
+  return s;
+}
+
+function match(text, limit = 4) {
+  const q = tokens(text);
+  return loadAll().map(p => ({ p, s: score(p, q) }))
+    .filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, limit)
+    .map(({ p, s }) => ({ id: p.id, title: p.title, tier: p.tier, why: `matched ${s} signal(s)`, purpose: p.purpose }));
+}
+
+// ---- tools -----------------------------------------------------------------
+
+function promptProcess({ prompt }) {
+  const hits = match(prompt, 4);
+  // Tier-0 meta protocols are ALWAYS active and inject regardless of keyword score.
+  // Keyword matching can't guarantee an always-on meta protocol, so we force them in here.
+  const have = new Set(hits.map(h => h.id));
+  const always = loadAll()
+    .filter(p => /^0\b/.test((p.tier || '').trim()) && !have.has(p.id))
+    .map(p => ({ id: p.id, title: p.title, tier: p.tier, why: 'tier-0 always-active', purpose: p.purpose }));
+  const relevant = [...always, ...hits];
+  return {
+    prompt_seen: (prompt || '').slice(0, 120),
+    relevant_protocols: relevant,
+    directive: relevant.length
+      ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}. Read any with mikey_protocol_read.`
+      : 'No specific protocol triggered; proceed normally.',
+  };
+}
+
+function list() {
+  return loadAll().map(p => ({ id: p.id, title: p.title, tier: p.tier, priority: p.priority, purpose: p.purpose }));
+}
+
+function read({ id }) {
+  if (!id) throw new Error('protocol_read requires `id`');
+  const f = path.join(DIR, `${id}.md`);
+  if (!fs.existsSync(f)) return { id, error: 'not found', available: loadAll().map(p => p.id) };
+  return { id, content: fs.readFileSync(f, 'utf8') };
+}
+
+function search({ query }) {
+  if (!query) throw new Error('protocol_search requires `query`');
+  const q = query.toLowerCase();
+  return {
+    query,
+    matches: loadAll().filter(p => p.body.toLowerCase().includes(q))
+      .map(p => ({ id: p.id, title: p.title, snippet: (p.body.match(new RegExp(`.{0,60}${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.{0,60}`, 'i')) || [''])[0].replace(/\s+/g, ' ').trim() })),
+  };
+}
+
+function triggers({ situation }) {
+  if (!situation) throw new Error('protocol_triggers requires `situation`');
+  return { situation, suggested: match(situation, 5) };
+}
+
+const TOOLS = {
+  mikey_prompt_process:   { fn: promptProcess, desc: 'Pre-process a user prompt: returns the protocols whose triggers match, plus a directive. Run before responding.', schema: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] } },
+  mikey_protocol_list:    { fn: list,          desc: 'List all available protocols with tier and purpose.', schema: { type: 'object', properties: {} } },
+  mikey_protocol_read:    { fn: read,          desc: 'Read the full text of a protocol by id.', schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+  mikey_protocol_search:  { fn: search,        desc: 'Full-text search across protocol bodies.', schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+  mikey_protocol_triggers:{ fn: triggers,      desc: 'Given a situation, return the most relevant protocols.', schema: { type: 'object', properties: { situation: { type: 'string' } }, required: ['situation'] } },
+};
+
+const server = new Server({ name: 'mcp-protocols-lean', version: '1.0.0' }, { capabilities: { tools: {} } });
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.desc, inputSchema: t.schema })),
+}));
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  const t = TOOLS[req.params.name];
+  if (!t) return err(`unknown tool: ${req.params.name}`);
+  try { return ok(t.fn(req.params.arguments || {})); } catch (e) { return err(e.message); }
+});
+
+const transport = new StdioServerTransport();
+await server.connect(transport);
+console.error(`[protocols-lean] connected. dir=${DIR} protocols=${loadAll().length}`);

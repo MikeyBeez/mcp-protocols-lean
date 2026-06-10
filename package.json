@@ -1,0 +1,13 @@
+{
+  "name": "mcp-protocols-lean",
+  "version": "1.0.0",
+  "description": "Lean protocol server over the existing protocol library (replaces protocols + protocol-engine + protocol-tracker)",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.15.0"
+  }
+}
