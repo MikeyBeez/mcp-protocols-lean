@@ -75,10 +75,12 @@ function score(p, qToks) {
 }
 
 function match(text, limit = 4) {
-  const q = tokens(text);
-  return loadAll().map(p => ({ p, s: score(p, q) }))
+  const promptLower = (text || '').toLowerCase();
+  const qset = new Set(tokens(text));
+  const trig = loadTriggers();
+  return loadAll().map(p => ({ p, s: scoreKw(p, promptLower, qset, trig) }))
     .filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, limit)
-    .map(({ p, s }) => ({ id: p.id, title: p.title, tier: p.tier, why: `matched ${s} signal(s)`, purpose: p.purpose }));
+    .map(({ p, s }) => ({ id: p.id, title: p.title, tier: p.tier, why: `matched ${Math.round(s * 10) / 10} signal(s)`, purpose: p.purpose }));
 }
 
 // ---- situation -> tools map (protocols/tool-map.json, read live) -----------
@@ -87,6 +89,30 @@ function loadToolMap() {
   try {
     return JSON.parse(fs.readFileSync(path.join(DIR, 'tool-map.json'), 'utf8'));
   } catch { return []; }
+}
+
+function loadTriggers() {
+  try { return JSON.parse(fs.readFileSync(path.join(DIR, 'triggers.json'), 'utf8')).protocols || {}; }
+  catch { return {}; }
+}
+
+// Keyword scoring from triggers.json (machine authority). Phrases (multi-word) match
+// as substrings and weigh a bit more; single words match as tokens or substrings.
+// Falls back to the old .md prose scoring if a protocol is absent from triggers.json.
+// word-boundary match: avoids short keywords matching inside larger words
+// (e.g. 'gh' must not match 'right'); handles phrases + hyphen/underscore compounds.
+function wbTest(text, k) {
+  const esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('(^|[^a-z0-9])' + esc + '([^a-z0-9]|$)').test(text);
+}
+function scoreKw(p, promptLower, qset, trig) {
+  const t = trig[p.id];
+  if (t && Array.isArray(t.keywords) && t.keywords.length) {
+    let s = 0;
+    for (const k of t.keywords) if (wbTest(promptLower, k)) s += k.includes(' ') ? 1.5 : 1;
+    return s;
+  }
+  return score(p, [...qset]);
 }
 
 function matchTools(text, limit = 4) {
@@ -183,9 +209,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const args = req.params.arguments || {};
   const t = TOOLS[name];
   if (!t) return err(`unknown tool: ${name}`);
-  let status = 'success', result;
-  try { result = ok(t.fn(args)); } catch (e) { status = 'failure'; result = err(e.message); }
-  try { noteCall('protocols', name, args, status); } catch { /* never break the call */ }
+  let status = 'success', result, raw;
+  try { raw = t.fn(args); result = ok(raw); } catch (e) { status = 'failure'; result = err(e.message); }
+  try { noteCall('protocols', name, args, status, raw); } catch { /* never break the call */ }
   return result;
 });
 
