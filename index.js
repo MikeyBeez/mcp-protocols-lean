@@ -25,6 +25,12 @@ import fs from 'fs';
 import path from 'path';
 import { CONFIG } from './config.js';
 
+// Phase 4: best-effort ledger logging (enforcement-via-detection).
+// Optional — if the helper is missing/broken the server still runs, logging disabled.
+let noteCall = () => {};
+try { ({ noteCall } = await import('../harness/ledger_log.mjs')); }
+catch (e) { console.error('[protocols-lean] ledger logging disabled:', e.message); }
+
 const DIR = CONFIG.PROTOCOLS_DIR;
 if (!fs.existsSync(DIR)) { console.error(`[protocols-lean] FATAL: no protocols dir at ${DIR}`); process.exit(1); }
 
@@ -173,9 +179,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: t.desc, inputSchema: t.schema })),
 }));
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const t = TOOLS[req.params.name];
-  if (!t) return err(`unknown tool: ${req.params.name}`);
-  try { return ok(t.fn(req.params.arguments || {})); } catch (e) { return err(e.message); }
+  const name = req.params.name;
+  const args = req.params.arguments || {};
+  const t = TOOLS[name];
+  if (!t) return err(`unknown tool: ${name}`);
+  let status = 'success', result;
+  try { result = ok(t.fn(args)); } catch (e) { status = 'failure'; result = err(e.message); }
+  try { noteCall('protocols', name, args, status); } catch { /* never break the call */ }
+  return result;
 });
 
 const transport = new StdioServerTransport();
