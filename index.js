@@ -80,7 +80,7 @@ function match(text, limit = 4) {
   const trig = loadTriggers();
   return loadAll().map(p => ({ p, s: scoreKw(p, promptLower, qset, trig) }))
     .filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, limit)
-    .map(({ p, s }) => ({ id: p.id, title: p.title, tier: p.tier, why: `matched ${Math.round(s * 10) / 10} signal(s)`, purpose: p.purpose }));
+    .map(({ p, s }) => ({ id: p.id, title: p.title, tier: p.tier, score: Math.round(s * 10) / 10, why: `matched ${Math.round(s * 10) / 10} signal(s)`, purpose: p.purpose }));
 }
 
 // ---- situation -> tools map (protocols/tool-map.json, read live) -----------
@@ -142,6 +142,17 @@ function continuationNotice() {
 
 function promptProcess({ prompt }) {
   const hits = match(prompt, 4);
+  // prediction confidence over the TASK-relevant matches (exclude tier-0 always-active).
+  // 'none' flags a likely TRUE-MISS (no protocol fits) live, in the directive.
+  const taskHits = hits.filter(h => !/^0\b/.test((h.tier || '').trim()));
+  const _top = taskHits[0], _second = taskHits[1];
+  const _topScore = _top ? (_top.score || 0) : 0;
+  const _margin = Math.round((_topScore - (_second ? (_second.score || 0) : 0)) * 10) / 10;
+  const _level = !_top ? 'none' : (_topScore >= 2 && _margin >= 1 ? 'high' : (_topScore >= 1.5 ? 'medium' : 'low'));
+  const prediction_confidence = { level: _level, top: _top ? _top.id : null, top_score: _topScore, margin: _margin };
+  const confHint = _level === 'none'
+    ? ' ⚠️ No task-specific protocol matched (trigger confidence: none) — consider whether a protocol is missing for this kind of request.'
+    : (_level === 'low' ? ' (low trigger confidence — the match is weak.)' : '');
   // Tier-0 meta protocols are ALWAYS active and inject regardless of keyword score.
   // Keyword matching can't guarantee an always-on meta protocol, so we force them in here.
   const have = new Set(hits.map(h => h.id));
@@ -158,11 +169,12 @@ function promptProcess({ prompt }) {
     prompt_seen: (prompt || '').slice(0, 120),
     continuation_note: cont,
     relevant_protocols: relevant,
+    prediction_confidence,
     suggested_tools,
     directive: contDirective + (relevant.length
       ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}. Read any with mikey_protocol_read.`
         + (suggested_tools.length ? ` USE the suggested tools — they exist for this exact situation.` : '')
-      : 'No specific protocol triggered; proceed normally.'),
+      : 'No specific protocol triggered; proceed normally.') + confHint,
   };
 }
 
