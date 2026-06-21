@@ -94,6 +94,18 @@ function matchTools(text, limit = 4) {
     .map(({ e, s }) => ({ situation: e.situation, tools: e.tools, note: e.note, why: `matched ${s} keyword(s)` }));
 }
 
+// ---- continuation note (surfaced through the one call that always runs) ----
+
+const HANDOFF = path.join(process.env.HOME || '', 'Code/claude-brain/data/continuation-note-latest.md');
+
+function continuationNotice() {
+  try {
+    const st = fs.statSync(HANDOFF);
+    const ageH = Math.round(((Date.now() - st.mtimeMs) / 3.6e6) * 10) / 10;
+    return { exists: true, age_hours: ageH, fresh: ageH < 24, path: HANDOFF };
+  } catch { return { exists: false }; }
+}
+
 // ---- tools -----------------------------------------------------------------
 
 function promptProcess({ prompt }) {
@@ -106,14 +118,19 @@ function promptProcess({ prompt }) {
     .map(p => ({ id: p.id, title: p.title, tier: p.tier, why: 'tier-0 always-active', purpose: p.purpose }));
   const relevant = [...always, ...hits];
   const suggested_tools = matchTools(prompt, 4);
+  const cont = continuationNotice();
+  const contDirective = (cont.exists && cont.fresh)
+    ? `⚠️ A continuation note exists (${cont.age_hours}h old) at ${cont.path}. BEFORE anything else, call continuation_read_with_staleness to resume the prior session, then open your reply with the timestamp. `
+    : '';
   return {
     prompt_seen: (prompt || '').slice(0, 120),
+    continuation_note: cont,
     relevant_protocols: relevant,
     suggested_tools,
-    directive: relevant.length
+    directive: contDirective + (relevant.length
       ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}. Read any with mikey_protocol_read.`
         + (suggested_tools.length ? ` USE the suggested tools — they exist for this exact situation.` : '')
-      : 'No specific protocol triggered; proceed normally.',
+      : 'No specific protocol triggered; proceed normally.'),
   };
 }
 
