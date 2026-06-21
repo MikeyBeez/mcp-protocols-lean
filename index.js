@@ -28,7 +28,8 @@ import { CONFIG } from './config.js';
 // Phase 4: best-effort ledger logging (enforcement-via-detection).
 // Optional — if the helper is missing/broken the server still runs, logging disabled.
 let noteCall = () => {};
-try { ({ noteCall } = await import('../harness/ledger_log.mjs')); }
+let complianceGap = () => [];
+try { ({ noteCall, complianceGap } = await import('../harness/ledger_log.mjs')); }
 catch (e) { console.error('[protocols-lean] ledger logging disabled:', e.message); }
 
 const DIR = CONFIG.PROTOCOLS_DIR;
@@ -153,6 +154,12 @@ function promptProcess({ prompt }) {
   const confHint = _level === 'none'
     ? ' ⚠️ No task-specific protocol matched (trigger confidence: none) — consider whether a protocol is missing for this kind of request.'
     : (_level === 'low' ? ' (low trigger confidence — the match is weak.)' : '');
+  // Compliance back-check: did the PREVIOUS turn ignore a strongly-recommended protocol?
+  let gapHint = '';
+  try {
+    const _gaps = complianceGap();
+    if (_gaps && _gaps.length) gapHint = ` ↩️ FOLLOW-UP from last turn: "${_gaps[0]}" was strongly recommended and there is no record you engaged it. This is EITHER a compliance error (you skipped it) OR a logging error (you applied it but it was not recorded). Check both: if you did NOT apply it, read it now (mikey_protocol_read) and apply it; if you DID apply it, record that engagement now so the ledger reflects reality. Do NOT just disregard — an unrecorded application is a logging error that corrupts the loop's own data. `;
+  } catch {}
   // Tier-0 meta protocols are ALWAYS active and inject regardless of keyword score.
   // Keyword matching can't guarantee an always-on meta protocol, so we force them in here.
   const have = new Set(hits.map(h => h.id));
@@ -171,7 +178,7 @@ function promptProcess({ prompt }) {
     relevant_protocols: relevant,
     prediction_confidence,
     suggested_tools,
-    directive: contDirective + (relevant.length
+    directive: contDirective + gapHint + (relevant.length
       ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}. Read any with mikey_protocol_read.`
         + (suggested_tools.length ? ` USE the suggested tools — they exist for this exact situation.` : '')
       : 'No specific protocol triggered; proceed normally.') + confHint,
