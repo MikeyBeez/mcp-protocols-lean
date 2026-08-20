@@ -85,13 +85,77 @@ function score(p, qToks) {
   return s;
 }
 
+
+// ---- protocol graph (edges.json) -------------------------------------------
+// Wired 2026-08-19 (plan step 4). Rationale: keyword scoring judges each protocol
+// in isolation, but failure situations run in chains — stop, recover, escalate.
+// After scoring, pull the top match's escalates_to / pairs_with neighbours in at
+// REDUCED weight so the whole spine surfaces. A neighbour can never outrank the
+// direct keyword match; it is a suggestion, not a verdict.
+const EDGE_TYPES_PULLED = ['escalates_to', 'pairs_with'];
+const NEIGHBOUR_WEIGHT = 0.35;
+let _edges = null;
+function loadEdges() {
+  if (_edges) return _edges;
+  const m = new Map();
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(DIR, '..', 'edges.json'), 'utf8'));
+    for (const e of (raw.edges || [])) {
+      if (!EDGE_TYPES_PULLED.includes(e.type)) continue;
+      for (const t of (e.to || [])) {
+        if (!m.has(e.from)) m.set(e.from, []);
+        m.get(e.from).push({ to: t, type: e.type });
+        if (e.type === 'pairs_with') {           // lateral: symmetric
+          if (!m.has(t)) m.set(t, []);
+          m.get(t).push({ to: e.from, type: e.type });
+        }
+      }
+    }
+  } catch (err) {
+    // Do NOT swallow. A silent catch here hid a ReferenceError for the whole of
+    // 2026-08-19's first wiring attempt: the graph simply never loaded and the
+    // matcher looked fine. Degrade, but say so on stderr.
+    console.error(`[protocols] edges.json not loaded, running without the graph: ${err.message}`);
+  }
+  _edges = m; return m;
+}
+
 function match(text, limit = 4) {
   const promptLower = (text || '').toLowerCase();
   const qset = new Set(tokens(text));
   const trig = loadTriggers();
-  return loadAll().map(p => ({ p, s: scoreKw(p, promptLower, qset, trig) }))
+  const all = loadAll();
+  const scored = new Map();                       // id -> {p, s, why}
+  for (const p of all) {
+    const s = scoreKw(p, promptLower, qset, trig);
+    if (s > 0) scored.set(p.id, { p, s, why: `matched ${Math.round(s * 10) / 10} signal(s)` });
+  }
+
+  // --- graph pull: neighbours of the top keyword match, at reduced weight ---
+  const ranked0 = [...scored.values()].sort((a, b) => b.s - a.s);
+  const top = ranked0[0];
+  if (top) {
+    const ceiling = top.s - 0.1;                  // a neighbour never ties or beats the direct match
+    const boost = Math.min(top.s * NEIGHBOUR_WEIGHT, ceiling);
+    for (const { to, type } of (loadEdges().get(top.p.id) || [])) {
+      if (to === top.p.id) continue;
+      const existing = scored.get(to);
+      if (existing) {
+        const lifted = Math.min(existing.s + boost, ceiling);
+        if (lifted > existing.s) {
+          existing.s = lifted;
+          if (!existing.why.includes('via ')) existing.why += ` + via ${type} from ${top.p.id}`;
+        }
+      } else {
+        const pr = all.find(x => x.id === to);
+        if (pr && boost > 0) scored.set(to, { p: pr, s: boost, why: `graph: via ${type} from ${top.p.id}` });
+      }
+    }
+  }
+
+  return [...scored.values()]
     .filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, limit)
-    .map(({ p, s }) => ({ id: p.id, title: p.title, tier: p.tier, score: Math.round(s * 10) / 10, why: `matched ${Math.round(s * 10) / 10} signal(s)`, purpose: p.purpose }));
+    .map(({ p, s, why }) => ({ id: p.id, title: p.title, tier: p.tier, score: Math.round(s * 10) / 10, why, purpose: p.purpose }));
 }
 
 // ---- situation -> tools map (protocols/tool-map.json, read live) -----------
