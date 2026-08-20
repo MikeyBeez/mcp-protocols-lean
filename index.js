@@ -402,6 +402,29 @@ const TOOLS = {
   mikey_protocol_read:    { fn: read,          desc: 'Read the full text of a protocol by id.', schema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
   mikey_protocol_search:  { fn: search,        desc: 'Full-text search across protocol bodies.', schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
   mikey_protocol_triggers:{ fn: triggers,      desc: 'Given a situation, return the most relevant protocols and the tools to use for it.', schema: { type: 'object', properties: { situation: { type: 'string' } }, required: ['situation'] } },
+  mikey_propose:          { fn: a => improvement ? improvement.propose(a) : needLoop(),
+    desc: 'Propose a change to a protocol. Records what should change and why. Trigger-keyword changes apply automatically (guarded); everything else waits for Mikey.',
+    schema: { type: 'object', properties: {
+      protocol_id: { type: 'string' },
+      change_type: { type: 'string', enum: ['add_step','clarify_step','add_trigger','add_failure_mode','new_protocol','retire'] },
+      description: { type: 'string' }, reason: { type: 'string' }, evidence: { type: 'string' },
+      keywords: { type: 'array', items: { type: 'string' }, description: 'For add_trigger — supplying these auto-applies.' },
+      trace_id: { type: 'string' } }, required: ['protocol_id','change_type','description'] } },
+  mikey_review_proposals: { fn: a => improvement ? improvement.reviewProposals(a || {}) : needLoop(),
+    desc: 'List protocol-change proposals, with the trace each came from. The human review point.',
+    schema: { type: 'object', properties: { status: { type: 'string', enum: ['pending','applied','rejected','all'] }, limit: { type: 'number' } } } },
+  mikey_apply_proposal:   { fn: a => improvement ? improvement.applyProposal(a) : needLoop(),
+    desc: 'Apply or reject a proposal. Prose changes REQUIRE new_text; this tool never writes protocol prose itself. Always backs up first.',
+    schema: { type: 'object', properties: {
+      id: { type: 'number' }, approve: { type: 'boolean' },
+      keywords: { type: 'array', items: { type: 'string' } },
+      section: { type: 'string' }, new_text: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
+  mikey_graduation_track: { fn: a => improvement ? improvement.graduationTrack(a) : needLoop(),
+    desc: 'Record that a protocol ran and whether it worked. Flags when one is stable enough to become a tool.',
+    schema: { type: 'object', properties: {
+      protocol_id: { type: 'string' }, execution_type: { type: 'string', enum: ['text','chunked','tool'] },
+      success: { type: 'boolean' }, complexity_score: { type: 'number' }, trace_id: { type: 'string' } },
+      required: ['protocol_id'] } },
 };
 
 const server = new Server({ name: 'mcp-protocols-lean', version: '1.1.0' }, { capabilities: { tools: {} } });
