@@ -251,31 +251,44 @@ describe('mikey_prompt_process', () => {
   });
 });
 
-describe('known issues', () => {
-  // read() does path.join(DIR, `${id}.md`) with no containment check, so an id
-  // of '../x' escapes the protocol library. Read-only, and the id comes from the
-  // model rather than an outside caller, so this is lower severity than the
-  // filesystem-enhanced escape — but it is the same class of bug.
-  test('a protocol id cannot escape the library directory', { todo: true }, async () => {
+describe('containment and overrides', () => {
+  // Was a known issue until 2026-08-20: read() did path.join(DIR, `${id}.md`)
+  // with no containment check, so an id of '../x' escaped the protocol library.
+  // index.js now routes every id through protocolPath(), which resolves and
+  // requires the result to stay under DIR. Read-only and model-supplied, so the
+  // severity was low — but it was the same class of bug as the
+  // filesystem-enhanced escape, and this pins it shut.
+  test('a protocol id cannot escape the library directory', async () => {
     const outside = path.join(ctx.base, 'outside-note.md');
     fs.writeFileSync(outside, '# not a protocol\n');
     const r = await ctx.call('mikey_protocol_read', { id: '../outside-note' });
     assert.equal(r.error, 'not found', 'a traversing id should not resolve to a file outside the library');
   });
 
-  // The continuation-note path is hardcoded to
-  // $HOME/Code/claude-brain/data/continuation-note-latest.md. That is the last
-  // wire holding the retired claude-brain repo in place, and it means this
-  // behaviour cannot be exercised against a fixture.
-  test('the continuation-note path should be configurable by env', { todo: true }, async () => {
+  // Absolute ids are the same hole by another route: path.resolve discards DIR
+  // entirely when the second argument is absolute. Separate case, one line.
+  test('an absolute protocol id cannot escape either', async () => {
+    const outside = path.join(ctx.base, 'abs-note.md');
+    fs.writeFileSync(outside, '# not a protocol\n');
+    const r = await ctx.call('mikey_protocol_read', { id: path.join(ctx.base, 'abs-note') });
+    assert.equal(r.error, 'not found', 'an absolute id should not resolve to a file outside the library');
+  });
+
+  // The continuation-note path defaults to
+  // $HOME/Code/claude-brain/data/continuation-note-latest.md — the last wire
+  // holding the retired claude-brain repo in place — but index.js honours
+  // CONTINUATION_NOTE, so the behaviour CAN be exercised against a fixture.
+  // (This test sat todo asserting HANDOFF_NOTE, a variable nothing ever read.)
+  test('the continuation-note path is configurable by env', async () => {
     const { makeLibrary: mk, startServer: st, cleanup: cl } = await import('./helpers.mjs');
     const lib = mk();
     const note = path.join(lib.base, 'my-note.md');
     fs.writeFileSync(note, '# handoff\n');
-    const alt = await st(lib.dir, lib.base, { HANDOFF_NOTE: note });
+    const alt = await st(lib.dir, lib.base, { CONTINUATION_NOTE: note });
     const r = await alt.call('mikey_prompt_process', { prompt: 'anything' });
     await alt.client.close();
     cl(lib.base);
-    assert.equal(r.continuation_note.path, note, 'HANDOFF_NOTE should override the hardcoded path');
+    assert.equal(r.continuation_note.path, note, 'CONTINUATION_NOTE should override the default path');
+    assert.equal(r.continuation_note.exists, true, 'the fixture note exists, so it must be seen');
   });
 });

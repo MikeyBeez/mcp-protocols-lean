@@ -64,9 +64,23 @@ function loadAll() {
   return fs.readdirSync(DIR).filter(f => f.endsWith('.md')).map(parseProtocol);
 }
 
+/** Resolve a protocol id to its file INSIDE the library, or null if it escapes.
+ *  path.join(DIR, `${id}.md`) is not containment: an id of '../x', or an absolute
+ *  path, resolves to a file outside the library. Read-only, and ids come from the
+ *  model rather than an outside caller, so severity is low — but it is the same
+ *  class of bug as the filesystem-enhanced escape. BOTH call sites (readBody and
+ *  read) go through here; fixing one and not the other leaves the hole open. */
+function protocolPath(id) {
+  const base = path.resolve(DIR);
+  const f = path.resolve(base, `${id}.md`);
+  return f.startsWith(base + path.sep) ? f : null;
+}
+
 /** Raw text of one protocol, or null. Used to inline the top match. */
 function readBody(id) {
-  try { return fs.readFileSync(path.join(DIR, `${id}.md`), 'utf8'); } catch { return null; }
+  const f = protocolPath(id);
+  if (!f) return null;
+  try { return fs.readFileSync(f, 'utf8'); } catch { return null; }
 }
 
 // How much protocol text to put in front of the model at once. The library is 36
@@ -250,7 +264,7 @@ function matchTools(text, limit = 4) {
 // ---- continuation note (surfaced through the one call that always runs) ----
 
 // Overridable so tests (and any future relocation) do not have to move the real file.
-// It was hardcoded, which is why the existing suite could not exercise this path.
+// The env var is CONTINUATION_NOTE. Exercised by test/protocols.test.mjs.
 const HANDOFF = process.env.CONTINUATION_NOTE
   || path.join(process.env.HOME || '', 'Code/claude-brain/data/continuation-note-latest.md');
 
@@ -371,8 +385,8 @@ function list() {
 
 function read({ id }) {
   if (!id) throw new Error('protocol_read requires `id`');
-  const f = path.join(DIR, `${id}.md`);
-  if (!fs.existsSync(f)) return { id, error: 'not found', available: loadAll().map(p => p.id) };
+  const f = protocolPath(id);
+  if (!f || !fs.existsSync(f)) return { id, error: 'not found', available: loadAll().map(p => p.id) };
   return { id, content: fs.readFileSync(f, 'utf8') };
 }
 
