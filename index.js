@@ -63,6 +63,16 @@ function loadAll() {
   return fs.readdirSync(DIR).filter(f => f.endsWith('.md')).map(parseProtocol);
 }
 
+/** Raw text of one protocol, or null. Used to inline the top match. */
+function readBody(id) {
+  try { return fs.readFileSync(path.join(DIR, `${id}.md`), 'utf8'); } catch { return null; }
+}
+
+// How much protocol text to put in front of the model at once. The library is 36
+// files, mean 5.3 KB, p90 8.1 KB, largest 10.8 KB — so one whole protocol is
+// affordable and four are not. Hence: exactly one, and only when the match is good.
+const INLINE_MAX = 14000;
+
 // score a protocol against a free-text situation/prompt
 function score(p, qToks) {
   if (!qToks.length) return 0;
@@ -129,7 +139,10 @@ function matchTools(text, limit = 4) {
 
 // ---- continuation note (surfaced through the one call that always runs) ----
 
-const HANDOFF = path.join(process.env.HOME || '', 'Code/claude-brain/data/continuation-note-latest.md');
+// Overridable so tests (and any future relocation) do not have to move the real file.
+// It was hardcoded, which is why the existing suite could not exercise this path.
+const HANDOFF = process.env.CONTINUATION_NOTE
+  || path.join(process.env.HOME || '', 'Code/claude-brain/data/continuation-note-latest.md');
 
 function continuationNotice() {
   try {
@@ -167,6 +180,43 @@ function promptProcess({ prompt }) {
     .filter(p => /^0\b/.test((p.tier || '').trim()) && !have.has(p.id))
     .map(p => ({ id: p.id, title: p.title, tier: p.tier, why: 'tier-0 always-active', purpose: p.purpose }));
   const relevant = [...always, ...hits];
+
+  // ---- deliver the top match, do not merely name it -------------------------
+  //
+  // Retrieval was never the problem here. Across 254 traced turns the ledger held
+  // 233 protocol spans, of which 200 were prompt-processing recording itself: 34
+  // real engagements, about one turn in seven, and 21 of 36 protocols never engaged
+  // even once. Meanwhile the ONE protocol that fires reliably is prompt-processing —
+  // the only one whose content arrives inline, inside this directive.
+  //
+  // The protocols that get followed are the ones you do not have to go fetch. That
+  // is an interface property, not a discipline problem, so the interface changes:
+  // the top task-relevant protocol arrives as text, not as a name plus a round trip.
+  //
+  // Only one, and only at medium or high confidence. A weak match inlined is worse
+  // than a weak match named — it spends the budget AND teaches the reader to skim
+  // past inlined text.
+  let inlined = null;
+  if (_top && (_level === 'high' || _level === 'medium')) {
+    const body = readBody(_top.id);
+    if (body) {
+      const truncated = body.length > INLINE_MAX;
+      inlined = {
+        id: _top.id,
+        title: _top.title,
+        why: `top task-relevant match at ${_level} confidence (score ${_topScore}, margin ${_margin})`,
+        bytes: Math.min(body.length, INLINE_MAX),
+        truncated,
+        content: truncated
+          ? body.slice(0, INLINE_MAX) + `\n\n[truncated at ${INLINE_MAX} bytes — read the rest with mikey_protocol_read id=${_top.id}]`
+          : body,
+      };
+    }
+  }
+  const inlineDirective = inlined
+    ? ` The full text of "${inlined.id}" is included below under \`inlined_protocol\` — it is the top match and you do NOT need to read it separately. APPLY it.`
+    : '';
+
   const suggested_tools = matchTools(prompt, 4);
   const cont = continuationNotice();
   const contDirective = (cont.exists && cont.fresh)
@@ -177,9 +227,12 @@ function promptProcess({ prompt }) {
     continuation_note: cont,
     relevant_protocols: relevant,
     prediction_confidence,
+    inlined_protocol: inlined,
     suggested_tools,
     directive: contDirective + gapHint + (relevant.length
-      ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}. Read any with mikey_protocol_read.`
+      ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}.`
+        + inlineDirective
+        + ` Read any of the others with mikey_protocol_read.`
         + (suggested_tools.length ? ` USE the suggested tools — they exist for this exact situation.` : '')
       : 'No specific protocol triggered; proceed normally.') + confHint,
   };
