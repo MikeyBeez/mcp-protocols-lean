@@ -7,7 +7,7 @@ import { makeLibrary, startServer, cleanup } from './helpers.mjs';
 const TOOL_NAMES = [
   'mikey_prompt_process', 'mikey_protocol_list', 'mikey_protocol_read',
   'mikey_protocol_search', 'mikey_protocol_triggers',
-];
+  'mikey_propose', 'mikey_review_proposals', 'mikey_apply_proposal', 'mikey_graduation_track'];
 
 let ctx;
 
@@ -23,7 +23,7 @@ after(async () => {
 });
 
 describe('tool registry', () => {
-  test('advertises exactly the five documented tools', async () => {
+  test('advertises exactly the documented tools', async () => {
     const { tools } = await ctx.client.listTools();
     assert.deepEqual(tools.map(t => t.name).sort(), [...TOOL_NAMES].sort());
   });
