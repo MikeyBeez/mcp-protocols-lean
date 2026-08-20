@@ -23,6 +23,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'node:child_process';
 import { CONFIG } from './config.js';
 
 // Phase 4: best-effort ledger logging (enforcement-via-detection).
@@ -118,6 +119,51 @@ function loadEdges() {
     console.error(`[protocols] edges.json not loaded, running without the graph: ${err.message}`);
   }
   _edges = m; return m;
+}
+
+
+// ---- engram fallback (hybrid: keywords decide, embeddings rescue) -----------
+// Wired 2026-08-20 at Mikey's call ("we can have both"). Measured on 261 historical
+// prompts: 185 got none/low from keywords, and 34 of those (18%) have a semantic
+// top-1 >= 0.65 pointing at a protocol that plainly should have fired — e.g.
+// "smoke training job on pop, 150-step SGD regression" -> training-run-management
+// at 0.708, containing no word any sane trigger list would hold. Those 34 are what
+// this is for. It ADDS a candidate; it never edits triggers.json and never outranks
+// a confident keyword match, so June's precision work stays intact.
+const ENGRAM_MIN = 0.65;
+const ENGRAM_MODEL = 'nomic-embed-text';
+let _pvecs = undefined;
+function protocolVectors() {
+  if (_pvecs !== undefined) return _pvecs;
+  try {
+    const f = path.join(DIR, '..', 'protocol-engrams.json');
+    _pvecs = JSON.parse(fs.readFileSync(f, 'utf8')).vectors || null;
+  } catch (err) {
+    console.error(`[protocols] no protocol-engrams.json, engram fallback off: ${err.message}`);
+    _pvecs = null;
+  }
+  return _pvecs;
+}
+function embedSync(text) {
+  try {
+    const body = JSON.stringify({ model: ENGRAM_MODEL, prompt: `search_query: ${String(text).slice(0, 4000)}` });
+    const out = execFileSync('/usr/bin/curl',
+      ['-s','-m','3','-X','POST','http://localhost:11434/api/embeddings','-H','Content-Type: application/json','-d',body],
+      { encoding: 'utf8', timeout: 4000 });
+    return JSON.parse(out).embedding || null;
+  } catch { return null; }   // ollama down / slow -> keywords alone, silently fine
+}
+function engramMatch(text) {
+  const V = protocolVectors(); if (!V) return null;
+  const v = embedSync(text);  if (!v) return null;
+  let bestP = null, bestS = -1;
+  for (const [pid, pv] of Object.entries(V)) {
+    let d = 0, na = 0, nb = 0;
+    for (let i = 0; i < pv.length && i < v.length; i++) { d += v[i]*pv[i]; na += v[i]*v[i]; nb += pv[i]*pv[i]; }
+    const c = (na && nb) ? d / (Math.sqrt(na)*Math.sqrt(nb)) : 0;
+    if (c > bestS) { bestS = c; bestP = pid; }
+  }
+  return bestS >= ENGRAM_MIN ? { id: bestP, similarity: Math.round(bestS*1000)/1000 } : null;
 }
 
 function match(text, limit = 4) {
@@ -228,6 +274,23 @@ function promptProcess({ prompt }) {
   const _margin = Math.round((_topScore - (_second ? (_second.score || 0) : 0)) * 10) / 10;
   const _level = !_top ? 'none' : (_topScore >= 2 && _margin >= 1 ? 'high' : (_topScore >= 1.5 ? 'medium' : 'low'));
   const prediction_confidence = { level: _level, top: _top ? _top.id : null, top_score: _topScore, margin: _margin };
+
+  // Keywords were not confident. Ask the engrams whether they can see something.
+  let engram = null;
+  if (_level === 'low' || _level === 'none') {
+    engram = engramMatch(prompt);
+    if (engram) {
+      prediction_confidence.engram = engram;
+      const already = taskHits.find(h => h.id === engram.id);
+      if (already) {
+        already.why += ` + engram ${engram.similarity}`;
+      } else {
+        const pr = loadAll().find(x => x.id === engram.id);
+        if (pr) taskHits.push({ id: pr.id, title: pr.title, tier: pr.tier, score: 0,
+          why: `engram: semantic match ${engram.similarity} (no keyword hit)`, purpose: pr.purpose });
+      }
+    }
+  }
   const confHint = _level === 'none'
     ? ' ⚠️ No task-specific protocol matched (trigger confidence: none) — consider whether a protocol is missing for this kind of request.'
     : (_level === 'low' ? ' (low trigger confidence — the match is weak.)' : '');
@@ -327,6 +390,11 @@ function triggers({ situation }) {
   if (!situation) throw new Error('protocol_triggers requires `situation`');
   return { situation, suggested: match(situation, 5), suggested_tools: matchTools(situation, 4) };
 }
+
+let improvement = null;
+try { improvement = await import('../harness/improvement.mjs'); }
+catch (err) { console.error(`[protocols] improvement loop unavailable: ${err.message}`); }
+const needLoop = () => ({ ok: false, error: 'improvement loop module not loaded — see stderr' });
 
 const TOOLS = {
   mikey_prompt_process:   { fn: promptProcess, desc: 'Pre-process a user prompt: returns the protocols whose triggers match, suggested tools for the situation, plus a directive. Run before responding.', schema: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] } },
