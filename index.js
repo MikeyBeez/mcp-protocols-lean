@@ -218,6 +218,55 @@ function match(text, limit = 4) {
     .map(({ p, s, why }) => ({ id: p.id, title: p.title, tier: p.tier, score: Math.round(s * 10) / 10, why, purpose: p.purpose }));
 }
 
+// ---- session brain boot (folded in 2026-08-22) -----------------------------
+//
+// WHY THIS LIVES HERE. Mikey's standing instruction was "call brain_init at
+// session start", and on 2026-08-21 a four-hour session never called it once.
+// He then changed the instruction to "before responding to ANY user message",
+// which removes the ambiguity but re-reads ~36,800 characters (~9,200 tokens) of
+// byte-identical text every turn -- about 368,000 tokens over a forty-turn
+// session. His own better idea, from the same evening: put the call INSIDE a tool
+// that has to run anyway, so it stops being a decision at all. prompt_process is
+// that tool.
+//
+// Loaded once per session, then not again. "Session" is approximated by an
+// inactivity gap, because the server process outlives any single session -- it is
+// spawned when the app launches and serves every session until the app quits, so
+// a plain once-per-process flag would starve every session after the first.
+//
+// Reads brain.db directly through the sqlite3 CLI rather than adding a native
+// dependency to this server. Fails soft: no brain, no problem, routing still works.
+
+const BRAIN_DB = path.join(process.env.HOME || '', 'Code/Claude_Data/brain/brain.db');
+const SQLITE = ['/usr/bin/sqlite3', '/opt/homebrew/bin/sqlite3'].find(p => { try { return fs.existsSync(p); } catch { return false; } });
+const SESSION_GAP_MS = 30 * 60 * 1000;   // 30 min of silence => treat the next call as a new session
+let _lastPromptAt = 0;
+
+function sq(query) {
+  if (!SQLITE || !fs.existsSync(BRAIN_DB)) return null;
+  try {
+    const out = execFileSync(SQLITE, ['-json', '-readonly', BRAIN_DB, query], { encoding: 'utf8', timeout: 5000 });
+    return out.trim() ? JSON.parse(out) : [];
+  } catch { return null; }
+}
+
+// Same four queries brain_init runs (mcp-brain-lean/index.js init()), so the
+// folded-in payload and the standalone tool cannot drift apart.
+function brainBoot() {
+  const identity = sq("SELECT key,value FROM memories WHERE type IN ('identity','core_principle','philosophy') ORDER BY updated_at DESC LIMIT 8");
+  if (identity === null) return null;
+  const user_preferences = sq("SELECT key,value FROM memories WHERE type IN ('user_preferences','user_preference','user_profile') ORDER BY updated_at DESC LIMIT 8");
+  const recent = sq("SELECT key,type,substr(value,1,120) AS snippet,updated_at FROM memories ORDER BY updated_at DESC LIMIT 10");
+  const total = sq("SELECT count(*) AS n FROM memories");
+  return {
+    loaded_because: 'first prompt_process of this session',
+    total_memories: total && total[0] ? total[0].n : null,
+    identity: identity || [],
+    user_preferences: user_preferences || [],
+    recent: recent || [],
+  };
+}
+
 // ---- situation -> tools map (protocols/tool-map.json, read live) -----------
 
 function loadToolMap() {
@@ -359,6 +408,16 @@ function promptProcess({ prompt }) {
     : '';
 
   const suggested_tools = matchTools(prompt, 4);
+
+  // Fold in the session brain load. Once per session, not once per turn.
+  const _now = Date.now();
+  const _newSession = (_now - _lastPromptAt) > SESSION_GAP_MS;
+  _lastPromptAt = _now;
+  const brain = _newSession ? brainBoot() : null;
+  const brainDirective = brain
+    ? `Session context is included below under \`brain\` (${brain.total_memories} memories; identity, preferences, and the 10 most recent). This is the brain_init payload, loaded once for this session — you do NOT need to call brain_init separately. `
+    : '';
+
   const cont = continuationNotice();
   const contDirective = (cont.exists && cont.fresh)
     ? `⚠️ A continuation note exists (${cont.age_hours}h old) at ${cont.path}. BEFORE anything else, call continuation_read_with_staleness to resume the prior session, then open your reply with the timestamp. `
@@ -370,7 +429,8 @@ function promptProcess({ prompt }) {
     prediction_confidence,
     inlined_protocol: inlined,
     suggested_tools,
-    directive: contDirective + gapHint + (relevant.length
+    brain,
+    directive: brainDirective + contDirective + gapHint + (relevant.length
       ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}.`
         + inlineDirective
         + ` Read any of the others with mikey_protocol_read.`
