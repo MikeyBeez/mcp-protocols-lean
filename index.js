@@ -49,11 +49,39 @@ function section(body, heading) {
   const m = body.match(re); return m ? m[1].trim() : '';
 }
 
+/** Shorten to `max` without ever splitting a word, and mark the cut so it reads as
+ *  shortened rather than as text that ended. Silent truncation is the bug; the ellipsis
+ *  is the whole fix. Same lesson as gen-tool-inventory.mjs, where a mid-word cut turned
+ *  "brain_recall" into "brain_re" and made the contract checker report a phantom tool. */
+function clip(s, max) {
+  const t = String(s || '');
+  if (t.length <= max) return t;
+  let cut = t.slice(0, max);
+  const sp = cut.lastIndexOf(' ');
+  if (sp > 0) cut = cut.slice(0, sp);
+  return cut.replace(/[\s,;:.\-]+$/, '') + '…';
+}
+
 function parseProtocol(file) {
   const id = path.basename(file, '.md');
   const body = fs.readFileSync(path.join(DIR, file), 'utf8');
   const title = (body.match(/^#\s+(.+)$/m) || [, id])[1].trim();
-  const purpose = section(body, 'Purpose').replace(/\s+/g, ' ').slice(0, 300);
+  // Cut at a WORD BOUNDARY and SAY that it was cut. A bare .slice(0,300) here produced
+  // exactly the symptom Mikey reported on 2026-08-22 -- "partial sentences, things cut
+  // off" -- and an example is visible in that day's own transcript: intent-gate's purpose
+  // arrived ending "...hard to write down (ties to strugg". No ellipsis, no marker, so it
+  // reads as text that simply stops rather than text that was shortened. This field is in
+  // front of the model on EVERY prompt_process call, which is why it was the one people saw.
+  // FALL BACK to the `- **Purpose**:` metadata line when there is no `## Purpose` SECTION.
+  // Found 2026-08-22 by protocol_critic: three protocols -- create-project, tool-selection
+  // and training-run-management -- state their purpose ONLY on the metadata line, so this
+  // parser returned '' and every prompt_process result showed them with an empty purpose.
+  // tool-selection is among the most-matched protocols in the library; it had been arriving
+  // with no purpose text for as long as this parser has existed.
+  const purposeText = section(body, 'Purpose')
+    || (body.match(/^-\s*\*\*Purpose\*\*:\s*(.+)$/m) || [, ''])[1]
+    || '';
+  const purpose = clip(purposeText.replace(/\s+/g, ' '), 300);
   const triggers = section(body, 'Trigger Conditions') || section(body, 'Triggers');
   const tier = (body.match(/Tier\*?\*?:\s*([^\n]+)/i) || [, ''])[1].trim();
   const priority = (body.match(/Priority\*?\*?:\s*([^\n]+)/i) || [, ''])[1].trim();
