@@ -87,6 +87,25 @@ function readBody(id) {
 // files, mean 5.3 KB, p90 8.1 KB, largest 10.8 KB — so one whole protocol is
 // affordable and four are not. Hence: exactly one, and only when the match is good.
 const INLINE_MAX = 14000;
+// A SECOND inline slot, for tier-1 protocols only.
+//
+// WHY (measured 2026-08-22). Only the TOP match was ever delivered as text; everything
+// else arrived as a name in a list. Being second was nearly the same as not matching.
+// That is survivable for a tier-2 protocol and not survivable for tier 1, which is where
+// the safety rules live -- github-anonymization governs what gets pushed to the internet.
+//
+// It matters MORE on this surface than it looks. The UserPromptSubmit hook, which used to
+// inject several protocols in full, was proven that day to fire ONLY in the Claude Code
+// CLI: 13 hours of desktop/Cowork prompts produced no hook.log entry, while one CLI prompt
+// produced one immediately. So on the surface Mikey actually talks to, this tool IS the
+// enforcement layer -- there is no hook rung above it.
+//
+// Tier 1 only, and a tighter budget than the top slot. Tier 0 is excluded on purpose:
+// it always matches, so inlining it would spend the budget every single turn and teach
+// the reader to skim past inlined text, which is the one thing that would break the top
+// slot too.
+const SAFETY_INLINE_MAX = 7000;
+const SAFETY_INLINE_LIMIT = 2;
 
 // score a protocol against a free-text situation/prompt
 function score(p, qToks) {
@@ -448,6 +467,29 @@ function promptProcess({ prompt }) {
     ? ` The full text of "${inlined.id}" is included below under \`inlined_protocol\` — it is the top match and you do NOT need to read it separately. APPLY it.`
     : '';
 
+  // Tier-1 matches are DELIVERED, never merely named -- see SAFETY_INLINE_MAX above.
+  const also_inlined = [];
+  for (const h of relevant) {
+    if (also_inlined.length >= SAFETY_INLINE_LIMIT) break;
+    if (!/^1\b/.test((h.tier || '').trim())) continue;
+    if (inlined && h.id === inlined.id) continue;
+    const body = readBody(h.id);
+    if (!body) continue;
+    const truncated = body.length > SAFETY_INLINE_MAX;
+    also_inlined.push({
+      id: h.id, title: h.title, tier: h.tier,
+      why: `TIER 1 and it matched (${h.why}) — tier-1 protocols are delivered, not named`,
+      bytes: Math.min(body.length, SAFETY_INLINE_MAX),
+      truncated,
+      content: truncated
+        ? body.slice(0, SAFETY_INLINE_MAX) + `\n\n[truncated at ${SAFETY_INLINE_MAX} bytes — read the rest with mikey_protocol_read id=${h.id}]`
+        : body,
+    });
+  }
+  const safetyDirective = also_inlined.length
+    ? ` ⚠️ TIER 1 also matched: ${also_inlined.map(x => x.id).join(', ')} — full text is below under \`also_inlined\`. These are the critical-tier rules; APPLY them too, do not skim past them because they are not the top match.`
+    : '';
+
   const suggested_tools = matchTools(prompt, 4);
 
   // Fold in the session brain load. Once per session, not once per turn.
@@ -469,11 +511,13 @@ function promptProcess({ prompt }) {
     relevant_protocols: relevant,
     prediction_confidence,
     inlined_protocol: inlined,
+    also_inlined,
     suggested_tools,
     brain,
     directive: brainDirective + contDirective + engramHint + gapHint + (relevant.length
       ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}.`
         + inlineDirective
+        + safetyDirective
         + ` Read any of the others with mikey_protocol_read.`
         + (suggested_tools.length ? ` USE the suggested tools — they exist for this exact situation.` : '')
       : 'No specific protocol triggered; proceed normally.') + confHint,
