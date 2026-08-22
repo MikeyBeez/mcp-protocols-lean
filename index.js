@@ -299,12 +299,22 @@ function scoreKw(p, promptLower, qset, trig) {
   return score(p, [...qset]);
 }
 
+// FIXED 2026-08-22. This used to test `tokenSet.has(keyword)`, so a multi-word
+// keyword could never equal a single token and every PHRASE in tool-map.json
+// scored zero -- silently, forever. Measured before the fix: 22 of 154 keywords
+// were dead, and the mcp-github-research entry had 14 of its 15 dead ("prior art",
+// "has anyone", "already working", "been reported" -- every phrase Mikey would
+// actually say). Only the bare word "upstream" survived, which is why that server
+// showed 1 call after being deliberately routed.
+//
+// It now uses the SAME wbTest as scoreKw() does for protocols, so the two matchers
+// agree and phrases weigh slightly more, exactly as they do on the protocol side.
 function matchTools(text, limit = 4) {
-  const q = new Set(tokens(text));
-  if (!q.size) return [];
+  const promptLower = (text || '').toLowerCase();
+  if (!promptLower.trim()) return [];
   return loadToolMap().map(e => {
     let s = 0;
-    for (const k of (e.keywords || [])) if (q.has(k.toLowerCase())) s += 1;
+    for (const k of (e.keywords || [])) if (wbTest(promptLower, k)) s += k.includes(' ') ? 1.5 : 1;
     return { e, s };
   }).filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, limit)
     .map(({ e, s }) => ({ situation: e.situation, tools: e.tools, note: e.note, why: `matched ${s} keyword(s)` }));
