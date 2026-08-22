@@ -349,7 +349,7 @@ function promptProcess({ prompt }) {
   const prediction_confidence = { level: _level, top: _top ? _top.id : null, top_score: _topScore, margin: _margin };
 
   // Keywords were not confident. Ask the engrams whether they can see something.
-  let engram = null;
+  let engram = null, engramPromoted = null;
   if (_level === 'low' || _level === 'none') {
     engram = engramMatch(prompt);
     if (engram) {
@@ -359,11 +359,42 @@ function promptProcess({ prompt }) {
         already.why += ` + engram ${engram.similarity}`;
       } else {
         const pr = loadAll().find(x => x.id === engram.id);
-        if (pr) taskHits.push({ id: pr.id, title: pr.title, tier: pr.tier, score: 0,
-          why: `engram: semantic match ${engram.similarity} (no keyword hit)`, purpose: pr.purpose });
+        if (pr) {
+          // FIXED 2026-08-22. This used to push onto taskHits ONLY. taskHits is a
+          // .filter() of hits -- a NEW array -- so the rescued protocol was computed,
+          // appended to a throwaway, and never reached `relevant`, which is built from
+          // `hits`. The engram was not merely "reported but not acted on"; it was
+          // dropped on the floor.
+          //
+          // Measured cost of that, 2026-08-21: on "it should be a repo if it's
+          // anonymized" the keywords scored github-anonymization at ZERO (the prompt
+          // contains none of push/github/publish/remote/origin) while the engram saw
+          // it at 0.759, the highest similarity of that whole session. It is a TIER 1
+          // safety protocol governing what gets published to the internet, and the
+          // directive never named it. The next action on the table was `gh repo
+          // create` on a repo holding an ssh config block.
+          const rescued = { id: pr.id, title: pr.title, tier: pr.tier, score: 0,
+            why: `engram: semantic match ${engram.similarity} (no keyword hit)`, purpose: pr.purpose };
+          const tier01 = /^[01]\b/.test((pr.tier || '').trim());
+          if (tier01 && engram.similarity >= 0.70) {
+            // A strong hit on a tier 0/1 protocol is promoted to the FRONT and named in
+            // the directive. Deliberately narrower than the 0.65 rescue floor and scoped
+            // to the two tiers that carry safety and always-on meta rules, so it cannot
+            // flood the list with tier-2 guesses.
+            rescued.why = `engram rescue ${engram.similarity} — TIER ${pr.tier.trim()[0]}, keywords missed it entirely`;
+            engramPromoted = rescued;
+            hits.unshift(rescued);
+          } else {
+            hits.push(rescued);
+          }
+          taskHits.push(rescued);
+        }
       }
     }
   }
+  const engramHint = engramPromoted
+    ? ` ⚠️ ${engramPromoted.id} was matched by MEANING, not by keywords — its trigger words are absent from this prompt and it is tier ${engramPromoted.tier.trim()[0]}. Treat it as recommended, not incidental.`
+    : '';
   const confHint = _level === 'none'
     ? ' ⚠️ No task-specific protocol matched (trigger confidence: none) — consider whether a protocol is missing for this kind of request.'
     : (_level === 'low' ? ' (low trigger confidence — the match is weak.)' : '');
@@ -440,7 +471,7 @@ function promptProcess({ prompt }) {
     inlined_protocol: inlined,
     suggested_tools,
     brain,
-    directive: brainDirective + contDirective + gapHint + (relevant.length
+    directive: brainDirective + contDirective + engramHint + gapHint + (relevant.length
       ? `Follow these protocols before responding: ${relevant.map(h => h.id).join(', ')}.`
         + inlineDirective
         + ` Read any of the others with mikey_protocol_read.`
