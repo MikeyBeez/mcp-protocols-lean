@@ -287,7 +287,17 @@ function match(text, limit = 4) {
 const BRAIN_DB = path.join(process.env.HOME || '', 'Code/Claude_Data/brain/brain.db');
 const SQLITE = ['/usr/bin/sqlite3', '/opt/homebrew/bin/sqlite3'].find(p => { try { return fs.existsSync(p); } catch { return false; } });
 const SESSION_GAP_MS = 30 * 60 * 1000;   // 30 min of silence => treat the next call as a new session
-let _lastPromptAt = 0;
+// PERSISTED across process restarts (2026-08-30, Mikey: use pointers so the
+// payload can be dropped after it runs). The old in-memory flag reset every
+// time the app or the MCP bridge respawned this server, so one conversation
+// received the full ~9K-token brain payload once per reconnect -- measured
+// six deliveries in a single session on 2026-08-29/30. A stamp file survives
+// the respawn; the payload re-sends only after a true 30-minute silence gap.
+const BOOT_STAMP = path.join(process.env.HOME || '', 'Code/Claude_Data/brain/.prompt_process_last');
+function readStamp() { try { return parseInt(fs.readFileSync(BOOT_STAMP, 'utf8'), 10) || 0; } catch { return 0; } }
+function writeStamp(t) { try { fs.writeFileSync(BOOT_STAMP, String(t)); } catch {} }
+let _lastPromptAt = readStamp();
+let _freshProcess = true;
 
 function sq(query) {
   if (!SQLITE || !fs.existsSync(BRAIN_DB)) return null;
@@ -523,9 +533,17 @@ function promptProcess({ prompt }) {
   // Fold in the session brain load. Once per session, not once per turn.
   const _now = Date.now();
   const _newSession = (_now - _lastPromptAt) > SESSION_GAP_MS;
+  const _sinceMin = _lastPromptAt ? Math.round((_now - _lastPromptAt) / 60000) : null;
   _lastPromptAt = _now;
-  const brain = _newSession ? brainBoot() : null;
-  const brainDirective = brain
+  writeStamp(_now);
+  let brain = _newSession ? brainBoot() : null;
+  if (!brain && _freshProcess) {
+    // Fresh process, ongoing conversation: hand back a POINTER, not a copy.
+    brain = { already_loaded: true, minutes_since_last_delivery: _sinceMin,
+              note: 'brain payload was already delivered to this conversation; call brain_init only if this is genuinely a new conversation with no brain context above.' };
+  }
+  _freshProcess = false;
+  const brainDirective = (brain && brain.identity)
     ? `Session context is included below under \`brain\` (${brain.total_memories} memories; identity, preferences, and the 10 most recent). This is the brain_init payload, loaded once for this session — you do NOT need to call brain_init separately. `
     : '';
 
