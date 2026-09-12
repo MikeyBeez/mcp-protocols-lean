@@ -551,6 +551,17 @@ function promptProcess({ prompt }) {
   const contDirective = (cont.exists && cont.fresh)
     ? `⚠️ A continuation note exists (${cont.age_hours}h old) at ${cont.path}. BEFORE anything else, call continuation_read_with_staleness to resume the prior session, then open your reply with the timestamp. `
     : '';
+  // Open a graduation row for every protocol routed (success NULL until
+  // mikey_graduation_track closes it). Signal in the path, not a reminder in
+  // a document: the audit of 2026-09-12 found 4 rows in 23 days otherwise.
+  let gradDirective = '';
+  try {
+    if (improvement && relevant.length) {
+      const r = improvement.graduationSurface({ protocol_ids: relevant.map(h => h.id) });
+      if (r && r.opened && r.opened.length)
+        gradDirective = ` When the task ends, call mikey_graduation_track for each of these you actually followed (${r.opened.join(', ')}) with success true/false — the row is already open and waiting for its outcome.`;
+    }
+  } catch (e) { console.error(`[protocols] graduationSurface failed: ${e.message}`); }
   return {
     prompt_seen: (prompt || '').slice(0, 120),
     continuation_note: cont,
@@ -566,6 +577,7 @@ function promptProcess({ prompt }) {
         + safetyDirective
         + ` Read any of the others with mikey_protocol_read.`
         + (suggested_tools.length ? ` USE the suggested tools — they exist for this exact situation.` : '')
+        + gradDirective
       : 'No specific protocol triggered; proceed normally.') + confHint,
   };
 }
@@ -625,6 +637,7 @@ const TOOLS = {
       keywords: { type: 'array', items: { type: 'string' } },
       section: { type: 'string' }, new_text: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
   mikey_graduation_track: { fn: a => improvement ? improvement.graduationTrack(a) : needLoop(),
+  mikey_graduation_status: { fn: a => improvement ? improvement.graduationStatus(a || {}) : needLoop(), desc: 'Audit view: every protocol, surfaced vs outcome-recorded vs succeeded, last N days (default 30). Use to see which protocols are near graduation and which are being surfaced but never closed.', schema: { type: 'object', properties: { days: { type: 'number' } } } },
     desc: 'Record that a protocol ran and whether it worked. Flags when one is stable enough to become a tool.',
     schema: { type: 'object', properties: {
       protocol_id: { type: 'string' }, execution_type: { type: 'string', enum: ['text','chunked','tool'] },
