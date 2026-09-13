@@ -637,12 +637,12 @@ const TOOLS = {
       keywords: { type: 'array', items: { type: 'string' } },
       section: { type: 'string' }, new_text: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
   mikey_graduation_track: { fn: a => improvement ? improvement.graduationTrack(a) : needLoop(),
-  mikey_graduation_status: { fn: a => improvement ? improvement.graduationStatus(a || {}) : needLoop(), desc: 'Audit view: every protocol, surfaced vs outcome-recorded vs succeeded, last N days (default 30). Use to see which protocols are near graduation and which are being surfaced but never closed.', schema: { type: 'object', properties: { days: { type: 'number' } } } },
     desc: 'Record that a protocol ran and whether it worked. Flags when one is stable enough to become a tool.',
     schema: { type: 'object', properties: {
       protocol_id: { type: 'string' }, execution_type: { type: 'string', enum: ['text','chunked','tool'] },
-      success: { type: 'boolean' }, complexity_score: { type: 'number' }, trace_id: { type: 'string' } },
+      success: { type: 'boolean' }, applicable: { type: 'boolean', description: 'false = surfaced but did not apply to this turn; closes the row as not_applicable' }, complexity_score: { type: 'number' }, trace_id: { type: 'string' } },
       required: ['protocol_id'] } },
+  mikey_graduation_status: { fn: a => improvement ? improvement.graduationStatus(a || {}) : needLoop(), desc: 'Audit view: every protocol, surfaced vs outcome-recorded vs succeeded, last N days (default 30). Use to see which protocols are near graduation and which are being surfaced but never closed.', schema: { type: 'object', properties: { days: { type: 'number' } } } },
 };
 
 const server = new Server({ name: 'mcp-protocols-lean', version: '1.1.0' }, { capabilities: { tools: {} } });
