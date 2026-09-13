@@ -559,7 +559,7 @@ function promptProcess({ prompt }) {
     if (improvement && relevant.length) {
       const r = improvement.graduationSurface({ protocol_ids: relevant.map(h => h.id) });
       if (r && r.opened && r.opened.length)
-        gradDirective = ` When the task ends, call mikey_graduation_track for each of these you actually followed (${r.opened.join(', ')}) with success true/false — the row is already open and waiting for its outcome.`;
+        gradDirective = ` When the task ends, call mikey_graduation_track for each of these you actually followed (${r.opened.join(', ')}) with success true, false, or 'n/a' if it did not apply to this turn — the row is already open and waiting for its outcome.`;
     }
   } catch (e) { console.error(`[protocols] graduationSurface failed: ${e.message}`); }
   return {
